@@ -1,0 +1,95 @@
+image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/docker:latest
+
+include:
+  - project: 'fun-sun/deploy-rules'
+    ref: master
+    file:
+      - 'frontend-service-helm-template.yml'
+
+## Глобальные переменные
+variables:
+  TARGET_PORT: "80"
+  REPLICAS: "1"
+  IMAGE: $CI_REGISTRY_IMAGE:${CI_COMMIT_REF_NAME}
+
+stages:
+  - build
+  - deploy
+  - cleanup
+  - telegram
+
+##  Шаблон для docker login
+.docker-login:
+  before_script: &docker-login
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN registry-gitlab.fstravel.com
+
+##  Шаблон для build and push
+.build_template: &build_image
+  stage: build
+  script:
+    - rm -rf .env.local
+    - cp ${ENV_FILE} .env.local
+    - cat .env.local
+    - DOCKER_BUILDKIT=1 docker build -t ${IMAGE_NAME} -f docker/Dockerfile .
+    - docker push ${IMAGE_NAME}
+
+##############################################################
+Info_change_master:
+    stage: build
+    only:
+        - master
+    script:
+        - echo "Произошли изменения в master"
+###################### Build Image  ##########################
+
+build-stage:
+  stage: build
+  variables:
+    IMAGE_NAME: $IMAGE
+    ENV_FILE: .env.local.stage
+  <<: *build_image
+  before_script:
+    - *docker-login
+  only:
+    - stage
+
+build-prod:
+  stage: build
+  variables:
+    IMAGE_NAME: $IMAGE
+    ENV_FILE: .env.local.prod
+  <<: *build_image
+  before_script:
+    - *docker-login
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+    - when: never
+
+##############################################################
+
+######################    Deploy    ##########################
+Deploy_Main_K8S_Prod:
+    stage: deploy
+    only:
+        - tags
+    image: registry-gitlab.fstravel.com/base-image/tools/helm-kubectl:master
+    allow_failure: true
+    variables:
+        RELEASE_TAG: ${CI_COMMIT_REF_NAME}
+        CONTEXT: grade/k8s-base-project:grade-pvm-fas-k8s
+        ENVIRONMENT_NAME: Production
+        PROJECT_NAME: grade-front
+        HELM_NAME: ${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}
+        KUBE_REPLICAS: ${REPLICAS}
+        KUBE_SERVICE_TYPE: "NodePort"
+        KUBE_NODE_PORT_1: "31084"
+        KUBE_INGRESS: "False"
+        APP_PORT_1: ${TARGET_PORT}
+        NAMESPACE: facultative-prod
+        LIMITS_CPU: 1
+        LIMITS_MEM: 512Mi
+        GIT_STRATEGY: none
+    script:
+        - !reference [.deploy_to_k8s, script]
+    needs: ["build-prod"]
